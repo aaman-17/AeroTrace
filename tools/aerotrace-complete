@@ -1,0 +1,105 @@
+#!/usr/bin/env python3
+"""Aerotrace conservative 360-degree mesh completion worker.
+
+This worker regularizes an observed mesh into a continuous surface with Open3D's
+Poisson reconstruction. It does not recover architectural truth that is absent
+from the input; all generated output is marked as inferred in report.json.
+"""
+import argparse
+import json
+import sys
+from pathlib import Path
+
+
+def fail(message: str, report: Path | None = None) -> int:
+    payload = {"status": "error", "message": message}
+    if report:
+        report.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+    print(json.dumps(payload), file=sys.stderr)
+    return 2
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description="Complete an observed Aerotrace mesh conservatively")
+    parser.add_argument("--input", required=True, help="Observed OBJ, PLY, STL, or compatible mesh")
+    parser.add_argument("--output", required=True, help="Completed PLY/OBJ/GLB output path")
+    parser.add_argument("--report", required=True, help="JSON provenance report path")
+    parser.add_argument("--depth", type=int, default=9, help="Poisson octree depth; 8-11 is typical")
+    args = parser.parse_args()
+
+    input_path = Path(args.input).resolve()
+    output_path = Path(args.output).resolve()
+    report_path = Path(args.report).resolve()
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    report_path.parent.mkdir(parents=True, exist_ok=True)
+
+    try:
+        import numpy as np
+        import open3d as o3d
+    except ImportError as exc:
+        return fail("Open3D and NumPy are required. Install with: python3 -m pip install open3d numpy", report_path)
+
+    if not input_path.exists():
+        return fail(f"Observed mesh does not exist: {input_path}", report_path)
+
+    mesh = o3d.io.read_triangle_mesh(str(input_path))
+    if mesh.is_empty():
+        return fail("Observed mesh is empty or could not be decoded", report_path)
+
+    mesh.remove_duplicated_vertices()
+    mesh.remove_duplicated_triangles()
+    mesh.remove_degenerate_triangles()
+    mesh.remove_unreferenced_vertices()
+    mesh.compute_vertex_normals()
+
+    point_count = max(100_000, min(500_000, len(mesh.vertices) * 8))
+    cloud = mesh.sample_points_poisson_disk(number_of_points=point_count, init_factor=3)
+    if cloud.is_empty():
+        return fail("Could not sample points from observed mesh", report_path)
+    cloud.estimate_normals(o3d.geometry.KDTreeSearchParamHybrid(radius=0.08, max_nn=40))
+    cloud.orient_normals_consistent_tangent_plane(30)
+
+    completed, densities = o3d.geometry.TriangleMesh.create_from_point_cloud_poisson(
+        cloud, depth=max(8, min(11, args.depth)), scale=1.08, linear_fit=True
+    )
+    density_values = np.asarray(densities)
+    if len(density_values):
+        threshold = float(np.quantile(density_values, 0.02))
+        completed.remove_vertices_by_mask(density_values < threshold)
+    completed.remove_degenerate_triangles()
+    completed.remove_duplicated_triangles()
+    completed.remove_unreferenced_vertices()
+    completed.compute_vertex_normals()
+
+    if completed.is_empty() or len(completed.triangles) < 20:
+        return fail("Completion produced an empty or unusable mesh", report_path)
+
+    if not o3d.io.write_triangle_mesh(str(output_path), completed, write_vertex_normals=True):
+        return fail(f"Could not write completed mesh: {output_path}", report_path)
+
+    report = {
+        "status": "complete",
+        "method": "open3d-poisson-surface-regularization",
+        "provenance": {
+            "observed_geometry": str(input_path),
+            "geometrically_completed": str(output_path),
+            "ai_inferred_geometry": False,
+            "unseen_surfaces_are_estimates": True,
+        },
+        "limitations": [
+            "Poisson completion regularizes the observed surface and may close holes.",
+            "It cannot recover architectural details never present in the source views.",
+            "The output must not be treated as survey-grade unseen geometry without validation.",
+        ],
+        "input_vertices": len(mesh.vertices),
+        "input_triangles": len(mesh.triangles),
+        "output_vertices": len(completed.vertices),
+        "output_triangles": len(completed.triangles),
+    }
+    report_path.write_text(json.dumps(report, indent=2), encoding="utf-8")
+    print(json.dumps(report))
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

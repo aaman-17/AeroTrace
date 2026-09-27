@@ -1,0 +1,21 @@
+CREATE TABLE `reconstruction_jobs` (
+	`id` int AUTO_INCREMENT NOT NULL,
+	`userId` int NOT NULL,
+	`originalName` varchar(255) NOT NULL,
+	`inputKey` varchar(512) NOT NULL,
+	`inputUrl` varchar(1024) NOT NULL,
+	`status` enum('queued','processing','complete','partial','awaiting_gpu','error') NOT NULL DEFAULT 'queued',
+	`progress` int NOT NULL DEFAULT 0,
+	`message` text,
+	`resultGlbUrl` varchar(1024),
+	`resultObjUrl` varchar(1024),
+	`resultPlyUrl` varchar(1024),
+	`resultLasUrl` varchar(1024),
+	`reportUrl` varchar(1024),
+	`points` int,
+	`vertices` int,
+	`triangles` int,
+	`createdAt` timestamp NOT NULL DEFAULT (now()),
+	`updatedAt` timestamp NOT NULL DEFAULT (now()) ON UPDATE CURRENT_TIMESTAMP,
+	CONSTRAINT `reconstruction_jobs_id` PRIMARY KEY(`id`)
+);
